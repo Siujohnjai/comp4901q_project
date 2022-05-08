@@ -24,7 +24,7 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 from apex.parallel import DistributedDataParallel as DDP
 # from torch.nn.parallel import DistributedDataParallel as DDP
-# from torch.distributed.optim import ZeroRedundancyOptimizer
+from torch.distributed.optim import ZeroRedundancyOptimizer
 
 
 from utils import count_params, import_class
@@ -170,7 +170,7 @@ def get_parser():
         help='the indexes of GPUs for training or testing')
     parser.add_argument(
         '--optimizer',
-        default='SGD',
+        default='Adam',
         help='type of optimizer')
     parser.add_argument(
         '--nesterov',
@@ -261,10 +261,9 @@ class Processor():
                         else:
                             print('Dir not removed:', logdir)
 
-                self.train_writer = SummaryWriter(os.path.join(logdir, 'train'), 'train')
-                self.val_writer = SummaryWriter(os.path.join(logdir, 'val'), 'val')
+                self.train_writer = SummaryWriter(os.path.join(logdir, f'train{self.arg.local_rank}'), 'train{self.arg.local_rank}')
+                self.val_writer = SummaryWriter(os.path.join(logdir, f'val{self.arg.local_rank}'), 'val{self.arg.local_rank}')
             else:
-                # if self.arg.rank == 0:
                 self.train_writer = SummaryWriter(os.path.join(logdir, 'debug'), 'debug')
 
 
@@ -388,15 +387,17 @@ class Processor():
     def load_optimizer(self):
         params = list(self.optim_param_groups.values())
         if self.arg.optimizer == 'SGD':
-            self.optimizer = optim.SGD(
+            self.optimizer = ZeroRedundancyOptimizer(
                 params,
+                optim= optim.SGD,
                 lr=self.arg.base_lr,
                 momentum=0.9,
                 nesterov=self.arg.nesterov,
                 weight_decay=self.arg.weight_decay)
         elif self.arg.optimizer == 'Adam':
-            self.optimizer = optim.Adam(
+            self.optimizer = ZeroRedundancyOptimizer(
                 params,
+                optim= optim.Adam,
                 lr=self.arg.base_lr,
                 weight_decay=self.arg.weight_decay)
         else:
@@ -524,8 +525,7 @@ class Processor():
         self.model.train()
         loader = self.data_loader['train']
         loss_values = []
-        if self.arg.rank == 0:
-            self.train_writer.add_scalar('epoch', epoch + 1, self.global_step)
+        self.train_writer.add_scalar('epoch', epoch + 1, self.global_step)
         self.record_time()
         timer = dict(dataloader=0.001, model=0.001, statistics=0.001)
 
@@ -736,13 +736,10 @@ class Processor():
 
     def start(self):
         if self.arg.phase == 'train':
-            if self.arg.rank == 0: 
-                self.print_log(f'Parameters:\n{pprint.pformat(vars(self.arg))}\n')
-                self.print_log(f'Model total number of params: {count_params(self.model)}')
+            self.print_log(f'Parameters:\n{pprint.pformat(vars(self.arg))}\n')
+            self.print_log(f'Model total number of params: {count_params(self.model)}')
             self.global_step = self.arg.start_epoch * len(self.data_loader['train']) / self.arg.batch_size
-            start = time.time()
             for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
-                epoch_start = time.time()
                 save_model = ((epoch + 1) % self.arg.save_interval == 0) or (epoch + 1 == self.arg.num_epoch)
                 
                 if self.arg.distributed:
@@ -751,27 +748,17 @@ class Processor():
                 self.model = self.model.cuda()
                 self.train(epoch, save_model=save_model)
                 self.eval(epoch, save_score=self.arg.save_score, loader_name=['test'])
-                
-                epoch_end = time.time()
-                
-                if self.arg.rank == 0:
-                    self.print_log(f'Time used in epoch {epoch+1}: {epoch_end-epoch_start}s')
-            
-            end = time.time()
 
-            if self.arg.rank == 0:            
-                num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-                self.print_log(f'Time used: {end-start}s')
-                self.print_log(f'Average time used for each epoch: {(end-start)/(self.arg.num_epoch-self.arg.start_epoch)}s')
-                self.print_log(f'Best accuracy: {self.best_acc}')
-                self.print_log(f'Epoch number: {self.best_acc_epoch}')
-                self.print_log(f'Model name: {self.arg.work_dir}')
-                self.print_log(f'Model total number of params: {num_params}')
-                self.print_log(f'Weight decay: {self.arg.weight_decay}')
-                self.print_log(f'Base LR: {self.arg.base_lr}')
-                self.print_log(f'Batch Size: {self.arg.batch_size}')
-                self.print_log(f'Forward Batch Size: {self.arg.forward_batch_size}')
-                self.print_log(f'Test Batch Size: {self.arg.test_batch_size}')
+            num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            self.print_log(f'Best accuracy: {self.best_acc}')
+            self.print_log(f'Epoch number: {self.best_acc_epoch}')
+            self.print_log(f'Model name: {self.arg.work_dir}')
+            self.print_log(f'Model total number of params: {num_params}')
+            self.print_log(f'Weight decay: {self.arg.weight_decay}')
+            self.print_log(f'Base LR: {self.arg.base_lr}')
+            self.print_log(f'Batch Size: {self.arg.batch_size}')
+            self.print_log(f'Forward Batch Size: {self.arg.forward_batch_size}')
+            self.print_log(f'Test Batch Size: {self.arg.test_batch_size}')
 
         elif self.arg.phase == 'test':
             if not self.arg.test_feeder_args['debug']:

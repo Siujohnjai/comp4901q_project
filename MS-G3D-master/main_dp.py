@@ -630,12 +630,19 @@ class Processor():
             self.print_log(f'Parameters:\n{pprint.pformat(vars(self.arg))}\n')
             self.print_log(f'Model total number of params: {count_params(self.model)}')
             self.global_step = self.arg.start_epoch * len(self.data_loader['train']) / self.arg.batch_size
+            start = time.time()
             for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
+                epoch_start = time.time()
                 save_model = ((epoch + 1) % self.arg.save_interval == 0) or (epoch + 1 == self.arg.num_epoch)
                 self.train(epoch, save_model=save_model)
                 self.eval(epoch, save_score=self.arg.save_score, loader_name=['test'])
+                epoch_end = time.time()
+                self.print_log(f'Time used in epoch {epoch+1}: {epoch_end-epoch_start}s')
+            end = time.time()
 
             num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            self.print_log(f'Time used: {end-start}s')
+            self.print_log(f'Average time used for each epoch: {(end-start)/(self.arg.num_epoch-self.arg.start_epoch)}s')
             self.print_log(f'Best accuracy: {self.best_acc}')
             self.print_log(f'Epoch number: {self.best_acc_epoch}')
             self.print_log(f'Model name: {self.arg.work_dir}')

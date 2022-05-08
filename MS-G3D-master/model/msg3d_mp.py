@@ -157,7 +157,7 @@ class Model(nn.Module):
         N, C, T, V, M = x.size()
         x = x.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T)
         x = self.data_bn(x)
-        x = x.view(N * M, V, C, T).permute(0,2,3,1).contiguous().to(0)
+        x = x.view(N * M, V, C, T).permute(0,2,3,1).contiguous()
 
         splits = iter(x.split(8, dim=0))
         s_next = next(splits)

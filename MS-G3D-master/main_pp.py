@@ -22,10 +22,8 @@ import apex
 
 import torch.multiprocessing as mp
 import torch.distributed as dist
-from apex.parallel import DistributedDataParallel as DDP
-# from torch.nn.parallel import DistributedDataParallel as DDP
-# from torch.distributed.optim import ZeroRedundancyOptimizer
-
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.pipeline.sync import Pipe
 
 from utils import count_params, import_class
 
@@ -261,10 +259,9 @@ class Processor():
                         else:
                             print('Dir not removed:', logdir)
 
-                self.train_writer = SummaryWriter(os.path.join(logdir, 'train'), 'train')
-                self.val_writer = SummaryWriter(os.path.join(logdir, 'val'), 'val')
+                self.train_writer = SummaryWriter(os.path.join(logdir, f'train{self.arg.local_rank}'), 'train{self.arg.local_rank}')
+                self.val_writer = SummaryWriter(os.path.join(logdir, f'val{self.arg.local_rank}'), 'val{self.arg.local_rank}')
             else:
-                # if self.arg.rank == 0:
                 self.train_writer = SummaryWriter(os.path.join(logdir, 'debug'), 'debug')
 
 
@@ -326,14 +323,27 @@ class Processor():
         # output_device = self.arg.device[0] if type(
         #     self.arg.device) is list else self.arg.device
         # self.output_device = output_device
-        Model = import_class(self.arg.model)
+        Model1 = import_class("model.msg3d.Model1")
+        Model2 = import_class("model.msg3d.Model2")
+        Model3 = import_class("model.msg3d.Model3")
 
         # Copy model file and main
-        shutil.copy2(inspect.getfile(Model), self.arg.work_dir)
+        # shutil.copy2(inspect.getfile(Model1), self.arg.work_dir)
         shutil.copy2(os.path.join('.', __file__), self.arg.work_dir)
 
-        self.model = Model(**self.arg.model_args).cuda()
-        self.loss = nn.CrossEntropyLoss().cuda()
+        module_list = []
+        self.model1 = Model1(**self.arg.model_args)
+        self.model2 = Model2(**self.arg.model_args)
+        self.model3 = Model3(**self.arg.model_args)
+        # module
+        module_list.append(nn.Sequential(self.model1.to(self.arg.local_rank)))
+        module_list.append(nn.Sequential(self.model2.to(self.arg.local_rank)))
+        module_list.append(nn.Sequential(self.model3.to(self.arg.local_rank+1)))
+
+        self.model = Pipe(torch.nn.Sequential(
+                            *module_list
+                            ), chunks = 8, checkpoint="never")
+        self.loss = nn.CrossEntropyLoss().cuda(self.arg.local_rank+1)
         self.print_log(f'Model total number of params: {count_params(self.model)}')
 
         if self.arg.weights:
@@ -524,8 +534,7 @@ class Processor():
         self.model.train()
         loader = self.data_loader['train']
         loss_values = []
-        if self.arg.rank == 0:
-            self.train_writer.add_scalar('epoch', epoch + 1, self.global_step)
+        self.train_writer.add_scalar('epoch', epoch + 1, self.global_step)
         self.record_time()
         timer = dict(dataloader=0.001, model=0.001, statistics=0.001)
 
@@ -736,42 +745,29 @@ class Processor():
 
     def start(self):
         if self.arg.phase == 'train':
-            if self.arg.rank == 0: 
-                self.print_log(f'Parameters:\n{pprint.pformat(vars(self.arg))}\n')
-                self.print_log(f'Model total number of params: {count_params(self.model)}')
+            self.print_log(f'Parameters:\n{pprint.pformat(vars(self.arg))}\n')
+            self.print_log(f'Model total number of params: {count_params(self.model)}')
             self.global_step = self.arg.start_epoch * len(self.data_loader['train']) / self.arg.batch_size
-            start = time.time()
             for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
-                epoch_start = time.time()
                 save_model = ((epoch + 1) % self.arg.save_interval == 0) or (epoch + 1 == self.arg.num_epoch)
                 
                 if self.arg.distributed:
                     self.sampler['train'].set_epoch(epoch)
 
-                self.model = self.model.cuda()
+                # self.model = self.model.cuda()
                 self.train(epoch, save_model=save_model)
                 self.eval(epoch, save_score=self.arg.save_score, loader_name=['test'])
-                
-                epoch_end = time.time()
-                
-                if self.arg.rank == 0:
-                    self.print_log(f'Time used in epoch {epoch+1}: {epoch_end-epoch_start}s')
-            
-            end = time.time()
 
-            if self.arg.rank == 0:            
-                num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-                self.print_log(f'Time used: {end-start}s')
-                self.print_log(f'Average time used for each epoch: {(end-start)/(self.arg.num_epoch-self.arg.start_epoch)}s')
-                self.print_log(f'Best accuracy: {self.best_acc}')
-                self.print_log(f'Epoch number: {self.best_acc_epoch}')
-                self.print_log(f'Model name: {self.arg.work_dir}')
-                self.print_log(f'Model total number of params: {num_params}')
-                self.print_log(f'Weight decay: {self.arg.weight_decay}')
-                self.print_log(f'Base LR: {self.arg.base_lr}')
-                self.print_log(f'Batch Size: {self.arg.batch_size}')
-                self.print_log(f'Forward Batch Size: {self.arg.forward_batch_size}')
-                self.print_log(f'Test Batch Size: {self.arg.test_batch_size}')
+            num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            self.print_log(f'Best accuracy: {self.best_acc}')
+            self.print_log(f'Epoch number: {self.best_acc_epoch}')
+            self.print_log(f'Model name: {self.arg.work_dir}')
+            self.print_log(f'Model total number of params: {num_params}')
+            self.print_log(f'Weight decay: {self.arg.weight_decay}')
+            self.print_log(f'Base LR: {self.arg.base_lr}')
+            self.print_log(f'Batch Size: {self.arg.batch_size}')
+            self.print_log(f'Forward Batch Size: {self.arg.forward_batch_size}')
+            self.print_log(f'Test Batch Size: {self.arg.test_batch_size}')
 
         elif self.arg.phase == 'test':
             if not self.arg.test_feeder_args['debug']:

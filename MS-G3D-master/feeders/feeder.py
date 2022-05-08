@@ -68,8 +68,8 @@ class Feeder(Dataset):
     def __len__(self):
         return len(self.label)
 
-    # def __iter__(self):
-    #     return self
+    def __iter__(self):
+        return self
 
     def __getitem__(self, index):
         data_numpy = self.data[index]
